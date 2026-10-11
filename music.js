@@ -107,5 +107,5 @@
     return inflight[key];
   }
 
-  window.Music = { findPreview };
+  window.Music = { findPreview, score };
 })();

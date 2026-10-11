@@ -235,3 +235,23 @@ dialog li { margin-bottom: 6px; }
   .disc { width: 100px; height: 100px; }
   .mystery .year { font-size: 2.4rem; }
 }
+
+/* ---------- spotify ---------- */
+.spotify-box {
+  margin-top: 12px; padding: 14px; border-radius: 12px;
+  border: 1px solid rgba(30, 215, 96, .45); background: rgba(30, 215, 96, .07);
+}
+.spotify-box.warn { border-color: var(--gold); background: rgba(244, 201, 93, .08); }
+.spotify-box p { margin: 6px 0; }
+.spotify-box ol { padding-left: 20px; margin: 8px 0; }
+.spotify-box li { margin-bottom: 4px; }
+.spotify-box summary { cursor: pointer; color: #1ed760; }
+.spotify-box a { color: #1ed760; }
+.spotify-box .row input[type="text"] { flex: 1; min-width: 180px; }
+code.copy { user-select: all; word-break: break-all; }
+button.spotify { background: #1ed760; border-color: #1ed760; color: #000; font-weight: 700; }
+button.spotify:hover:not(:disabled) { background: #3be477; }
+select {
+  font: inherit; color: var(--text); background: rgba(0,0,0,.25);
+  border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; margin-left: 6px; max-width: 100%;
+}

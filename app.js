@@ -19,7 +19,7 @@
   };
 
   const settings = Object.assign(
-    { players: ["", ""], packs: ["hits", "christmas"], target: 10, startTokens: 2, source: "online" },
+    { players: ["", ""], packs: ["hits", "christmas"], target: 10, startTokens: 2, source: "online", spotifyDevice: "browser" },
     load(SETTINGS_KEY, {})
   );
   let customSongs = load(CUSTOM_KEY, []); // [{year, artist, title}]
@@ -97,9 +97,11 @@
         ? `Only ${songs.length} songs with a year were found; you need at least ${needed}.`
         : `Pick more song packs: you need at least ${needed} songs.`);
     }
+    if (settings.source === "spotify" && !SpotifyApi.isConnected()) return toast("Connect to Spotify first.");
     const deck = shuffle(songs.map((s, id) => ({ ...s, id })));
     S = {
       source: settings.source,
+      spotifyDevice: settings.spotifyDevice,
       target: Math.max(2, +settings.target || 10),
       players: names.map((name) => ({ name, cards: [deck.pop()], tokens: +settings.startTokens || 0 })),
       deck,
@@ -122,7 +124,7 @@
   function endGame(reason) {
     S.phase = "over";
     S.endReason = reason || "";
-    stopAudio();
+    stopAudio({ spotify: true });
     saveGame();
     render();
   }
@@ -174,12 +176,23 @@
   }
 
   // ---------- audio ----------
-  function stopAudio() {
+  // Three sources: "online" (30s previews in <audio>), "local" (files in <audio>)
+  // and "spotify" (full tracks played by Spotify in this browser or on a device).
+  const isSpotify = () => (S ? S.source : settings.source) === "spotify";
+  const spotifyTarget = () => (S && S.spotifyDevice) || settings.spotifyDevice || "browser";
+  let spotifyStarted = false; // has the current song been sent to Spotify yet?
+
+  function stopAudio(opts) {
     audioToken++;
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
     if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+    // Starting a new Spotify track replaces the old one, so only pause when asked.
+    if (opts && opts.spotify && SpotifyApi.isConnected() && spotifyStarted) {
+      SpotifyApi.pause(spotifyTarget()).catch(() => {});
+    }
+    spotifyStarted = false;
   }
 
   function setAudio(state, msg) {
@@ -188,30 +201,45 @@
     if (S) render();
   }
 
+  // Finds something playable for a song: a URL for <audio>, or a Spotify URI.
+  async function resolveSong(song, source) {
+    if (source === "local") return song.path && localFiles[song.path] ? (objectUrl = URL.createObjectURL(localFiles[song.path])) : undefined;
+    if (source === "spotify") return SpotifyApi.findTrack(song);
+    return Music.findPreview(song);
+  }
+
   async function loadAudio() {
     stopAudio();
     const token = audioToken;
     const song = S && S.song;
     if (!song) return;
-    let url;
-    if (S.source === "local") {
-      const f = localFiles[song.path];
-      if (!f) return setAudio("needfiles");
-      url = objectUrl = URL.createObjectURL(f);
-    } else {
-      setAudio("loading");
-      try {
-        url = await Music.findPreview(song);
-      } catch (e) {
-        if (token === audioToken) setAudio("error", "Can't reach the music service. Check the internet connection.");
-        return;
-      }
-      if (token !== audioToken) return;
-      if (!url) return replaceSong("That song had no preview available, so here's another one.");
+    if (S.source === "local" && !localFiles[song.path]) return setAudio("needfiles");
+    if (S.source === "spotify" && !SpotifyApi.isConnected()) return setAudio("error", "Not connected to Spotify. Go back to the setup screen to connect.");
+    setAudio("loading");
+    let src;
+    try {
+      src = await resolveSong(song, S.source);
+    } catch (e) {
+      if (token === audioToken) setAudio("error", S.source === "spotify" ? e.message : "Can't reach the music service. Check the internet connection.");
+      return;
     }
-    audio.src = url;
+    if (token !== audioToken) return;
+    if (!src) return replaceSong(`That song isn't available on ${S.source === "spotify" ? "Spotify" : "iTunes or Deezer"}, so here's another one.`);
     // Look up the next song in the background so the next turn starts fast.
-    if (S.source !== "local" && S.deck.length) Music.findPreview(S.deck[S.deck.length - 1]).catch(() => {});
+    const nextSong = S.deck[S.deck.length - 1];
+    if (S.source !== "local" && nextSong) resolveSong(nextSong, S.source).catch(() => {});
+    if (S.source === "spotify") {
+      try {
+        await SpotifyApi.play(src, spotifyTarget());
+        if (token !== audioToken) return;
+        spotifyStarted = true;
+        setAudio("playing");
+      } catch (e) {
+        if (token === audioToken) setAudio("error", e.message);
+      }
+      return;
+    }
+    audio.src = src;
     try {
       await audio.play();
     } catch (e) {
@@ -220,7 +248,7 @@
   }
 
   audio.addEventListener("playing", () => setAudio("playing"));
-  audio.addEventListener("pause", () => { if (ui.audio === "playing") setAudio("paused"); });
+  audio.addEventListener("pause", () => { if (ui.audio === "playing" && !isSpotify()) setAudio("paused"); });
   audio.addEventListener("ended", () => setAudio("paused"));
   audio.addEventListener("error", () => {
     if (!audio.getAttribute("src")) return;
@@ -228,28 +256,113 @@
     if (S && S.phase !== "over") setAudio("error", "This song failed to play.");
   });
 
+  SpotifyApi.onState((st) => {
+    if (st.error) {
+      if (ui.testing) { ui.testing.state = "error"; ui.testing.msg = st.error; render(); }
+      else if (S && S.source === "spotify") setAudio("error", st.error);
+      return;
+    }
+    if (S && S.source === "spotify" && spotifyStarted && ["playing", "paused"].includes(ui.audio)) {
+      setAudio(st.paused ? "paused" : "playing");
+    }
+  });
+
+  async function togglePlay() {
+    if (!isSpotify()) {
+      if (!audio.getAttribute("src")) return loadAudio();
+      return audio.paused ? audio.play().catch(() => {}) : audio.pause();
+    }
+    if (!spotifyStarted) return loadAudio();
+    const target = spotifyTarget();
+    try {
+      if (ui.audio === "playing") { await SpotifyApi.pause(target); setAudio("paused"); }
+      else { await SpotifyApi.resume(target); setAudio("playing"); }
+    } catch (e) {
+      setAudio("error", e.message);
+    }
+  }
+
+  function seek(kind) {
+    if (isSpotify()) {
+      if (spotifyStarted) SpotifyApi[kind](spotifyTarget()).catch((e) => toast(e.message));
+      return;
+    }
+    if (kind === "restart") { audio.currentTime = 0; audio.play().catch(() => {}); }
+    else audio.currentTime = Math.min((audio.duration || 0) - 1, audio.currentTime + 10);
+  }
+
   async function testSound() {
-    if (ui.testing) { stopAudio(); ui.testing = null; return render(); }
+    if (ui.testing) { stopAudio({ spotify: true }); ui.testing = null; return render(); }
     const songs = availableSongs();
     if (!songs.length) return toast("No songs selected.");
+    if (isSpotify() && !SpotifyApi.isConnected()) return toast("Connect to Spotify first.");
     const song = songs[Math.floor(Math.random() * songs.length)];
     stopAudio();
     const token = audioToken;
     ui.testing = { song, state: "loading" };
     render();
     try {
-      let url;
-      if (song.path) url = objectUrl = URL.createObjectURL(localFiles[song.path]);
-      else url = await Music.findPreview(song);
+      const src = await resolveSong(song, settings.source);
       if (token !== audioToken) return;
-      if (!url) { ui.testing.state = "missing"; return render(); }
-      audio.src = url;
-      await audio.play();
+      if (!src) { ui.testing.state = "missing"; return render(); }
+      if (isSpotify()) {
+        await SpotifyApi.play(src, spotifyTarget());
+        spotifyStarted = true;
+      } else {
+        audio.src = src;
+        await audio.play();
+      }
+      if (token !== audioToken) return;
       ui.testing.state = "playing";
     } catch (e) {
       if (token !== audioToken) return;
       ui.testing.state = "error";
+      ui.testing.msg = isSpotify() ? e.message : "";
     }
+    render();
+  }
+
+  // ---------- spotify setup ----------
+  async function refreshDevices() {
+    try {
+      ui.spotifyDevices = await SpotifyApi.devices();
+    } catch (e) {
+      ui.spotifyDevices = [];
+      toast(e.message);
+    }
+    render();
+  }
+
+  // Get the in-browser player going early so it's ready when the game starts.
+  function warmUpSpotify() {
+    if (!isSpotify() || !SpotifyApi.isConnected() || spotifyTarget() !== "browser") return;
+    ui.sdk = ui.sdk === "ready" ? "ready" : "starting";
+    SpotifyApi.initSdk().then(
+      () => { ui.sdk = "ready"; render(); },
+      (e) => { ui.sdk = "failed"; ui.sdkMsg = e.message; render(); }
+    );
+  }
+
+  async function importPlaylist() {
+    const input = document.getElementById("playlist-url");
+    if (!input || !input.value.trim()) return toast("Paste a Spotify playlist link first.");
+    ui.importing = true;
+    render();
+    try {
+      const { name, songs, suspicious } = await SpotifyApi.importPlaylist(input.value);
+      const known = new Set(customSongs.map((s) => s.uri || songKey(s)));
+      const fresh = songs.filter((s) => !known.has(s.uri) && !known.has(songKey(s)));
+      customSongs = customSongs.concat(fresh);
+      customDraft = null;
+      store(CUSTOM_KEY, customSongs);
+      if (!settings.packs.includes("custom")) settings.packs.push("custom");
+      saveSettings();
+      ui.openCustom = true;
+      toast(`Added ${fresh.length} songs from “${name}”.` + (suspicious ? ` ${suspicious} ${suspicious === 1 ? "looks" : "look"} like a remaster or compilation, so check the years in “My songs”.` : ""));
+    } catch (e) {
+      toast(e.message);
+    }
+    ui.importing = false;
     render();
   }
 
@@ -285,11 +398,13 @@
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.trim();
       if (!line || line.startsWith("#")) continue;
-      const parts = line.split(/\s*[;\t]\s*|\s*,\s*(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((p) => p.replace(/^"|"$/g, "").trim());
+      let uri;
+      const parts = line.split(/\s*[;\t]\s*|\s*,\s*(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((p) => p.replace(/^"|"$/g, "").trim())
+        .filter((p) => (/^spotify:track:\w+$/.test(p) ? ((uri = p), false) : true));
       const yi = parts.findIndex((p) => /^(1[89]\d\d|20\d\d)$/.test(p));
       if (yi < 0 || parts.length < 3) { bad.push(line); continue; }
       const year = +parts.splice(yi, 1)[0];
-      out.push({ year, artist: parts[0], title: parts.slice(1).join(", ") });
+      out.push(uri ? { year, artist: parts[0], title: parts.slice(1).join(", "), uri } : { year, artist: parts[0], title: parts.slice(1).join(", ") });
     }
     return { out, bad };
   }
@@ -302,8 +417,9 @@
 
   function renderSetup() {
     const packs = Object.entries(window.SONG_PACKS).map(([id, p]) => ({ id, name: p.name, n: p.songs.length }));
-    packs.push({ id: "custom", name: "My custom songs", n: customSongs.length });
+    packs.push({ id: "custom", name: "My songs & playlists", n: customSongs.length });
     const local = settings.source === "local";
+    const spotify = settings.source === "spotify";
     const t = ui.testing;
     let testLine = "";
     if (t) {
@@ -311,7 +427,7 @@
         loading: "Looking up a song…",
         playing: `✅ Playing: ${esc(t.song.artist)} – ${esc(t.song.title)} (${t.song.year})`,
         missing: `⚠️ No preview found for ${esc(t.song.artist)} – ${esc(t.song.title)}. That's fine, the game skips these.`,
-        error: "❌ Couldn't play anything. Check your internet connection.",
+        error: "❌ " + esc(t.msg || "Couldn't play anything. Check your internet connection."),
       }[t.state];
     }
     return `
@@ -329,13 +445,17 @@
 
         <h2>Music</h2>
         <div class="choices">
-          <label class="choice ${!local ? "on" : ""}">
-            <input type="radio" name="source" value="online" data-input="source" ${!local ? "checked" : ""} />
+          <label class="choice ${settings.source === "online" ? "on" : ""}">
+            <input type="radio" name="source" value="online" data-input="source" ${settings.source === "online" ? "checked" : ""} />
             <span><b>Built-in song packs</b><br><small>Plays 30-second previews from iTunes/Deezer. Needs internet.</small></span>
           </label>
           <label class="choice ${local ? "on" : ""}">
             <input type="radio" name="source" value="local" data-input="source" ${local ? "checked" : ""} />
             <span><b>My own music files</b><br><small>Works fully offline. The year comes from the MP3 tags or the file name.</small></span>
+          </label>
+          <label class="choice ${spotify ? "on" : ""}">
+            <input type="radio" name="source" value="spotify" data-input="source" ${spotify ? "checked" : ""} />
+            <span><b>Spotify</b><br><small>Full songs, plus your own playlists. Needs Spotify Premium.</small></span>
           </label>
         </div>
 
@@ -345,6 +465,7 @@
             <label class="button ghost">🎵 Choose files<input type="file" data-input="folder" accept="audio/*" multiple hidden /></label>
             <p class="muted">${esc(localStatus || "Name files like “Artist - Title (1984).mp3” if a tag has no year or the wrong one.")}</p>
           </div>` : `
+          ${spotify ? renderSpotifySetup() : ""}
           <div class="packs">
             ${packs.map((p) => `
               <label class="pack">
@@ -352,11 +473,11 @@
                 <span>${esc(p.name)}</span><span class="count">${p.n}</span>
               </label>`).join("")}
           </div>
-          <details class="custom" ${customDraft != null ? "open" : ""}>
-            <summary>Add your own songs</summary>
-            <p class="muted">One per line: <code>year; artist; title</code>. Good for family favourites! They are saved in this browser.</p>
-            <textarea id="custom-text" data-input="custom" rows="6" placeholder="1985; Opus; Live Is Life">${esc(customDraft != null ? customDraft : customSongs.map((s) => `${s.year}; ${s.artist}; ${s.title}`).join("\n"))}</textarea>
-            <button class="ghost" data-action="saveCustom">Save custom songs</button>
+          <details class="custom" ${customDraft != null || ui.openCustom ? "open" : ""}>
+            <summary>My songs (add or edit)</summary>
+            <p class="muted">One per line: <code>year; artist; title</code>. Good for family favourites! Imported Spotify songs also land here, so you can fix their years. Everything is saved in this browser.</p>
+            <textarea id="custom-text" data-input="custom" rows="6" placeholder="1985; Opus; Live Is Life">${esc(customDraft != null ? customDraft : customSongs.map((s) => `${s.year}; ${s.artist}; ${s.title}` + (s.uri ? `; ${s.uri}` : "")).join("\n"))}</textarea>
+            <button class="ghost" data-action="saveCustom">Save my songs</button>
           </details>`}
 
         <div class="row test">
@@ -372,6 +493,65 @@
         <p class="muted">${availableSongs().length} songs ready.</p>
         <button class="primary big" data-action="start">Start game 🎶</button>
       </section>`;
+  }
+
+  function renderSpotifySetup() {
+    if (!SpotifyApi.canLogin()) {
+      return `<div class="spotify-box warn">
+        <b>Spotify needs the game to be opened from a web address</b>, not as a file.
+        Use the GitHub Pages link, or start the little local server (see the README):
+        <code>python3 -m http.server 8000 --bind 127.0.0.1</code> and then open
+        <a href="http://127.0.0.1:8000/">http://127.0.0.1:8000/</a>.
+      </div>`;
+    }
+    if (!SpotifyApi.isConnected()) {
+      return `<div class="spotify-box">
+        <details ${SpotifyApi.clientId() ? "" : "open"}>
+          <summary>One-time setup (2 minutes)</summary>
+          <ol>
+            <li>Go to <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a>, log in and press <b>Create app</b>.</li>
+            <li>Use any name. Under <b>Redirect URIs</b>, add exactly:<br><code class="copy">${esc(SpotifyApi.redirectUri())}</code></li>
+            <li>Tick <b>Web API</b> and <b>Web Playback SDK</b>, then save.</li>
+            <li>Copy the <b>Client ID</b> and paste it below.</li>
+          </ol>
+          <p class="muted">The account that creates the app needs Premium. Anyone else who logs in must be added under <b>User Management</b> (max 5 people).</p>
+        </details>
+        <div class="row">
+          <input type="text" data-input="clientId" placeholder="Spotify Client ID" value="${esc(SpotifyApi.clientId())}" spellcheck="false" />
+          <button class="spotify" data-action="spotifyConnect">Connect Spotify</button>
+        </div>
+      </div>`;
+    }
+    const devs = ui.spotifyDevices || [];
+    const target = settings.spotifyDevice;
+    const known = target === "browser" || devs.some((d) => d.id === target);
+    let sdkLine = "";
+    if (target === "browser") {
+      sdkLine = { starting: "Starting the Spotify player in this browser…", ready: "✅ This browser is ready to play.", failed: "❌ " + esc(ui.sdkMsg) }[ui.sdk] || "";
+    } else {
+      sdkLine = "Tip: the Spotify app on that device shows the song title, so keep its screen out of sight!";
+    }
+    return `<div class="spotify-box">
+      <div class="row">
+        <span>✅ Connected as <b>${esc(SpotifyApi.userName())}</b></span>
+        <button class="mini" data-action="spotifyLogout">Disconnect</button>
+      </div>
+      <div class="row">
+        <label>Play on
+          <select data-input="spotifyDevice">
+            <option value="browser" ${target === "browser" ? "selected" : ""}>This browser</option>
+            ${devs.map((d) => `<option value="${esc(d.id)}" ${d.id === target ? "selected" : ""}>${esc(d.name)} (${esc(d.type.toLowerCase())})</option>`).join("")}
+            ${!known ? `<option value="${esc(target)}" selected>Last used device</option>` : ""}
+          </select>
+        </label>
+        <button class="mini" data-action="refreshDevices" title="Open Spotify on your phone or TV first">↻ Find devices</button>
+      </div>
+      <p class="muted">${sdkLine}</p>
+      <div class="row">
+        <input type="text" id="playlist-url" placeholder="Paste a Spotify playlist link to add its songs" />
+        <button data-action="importPlaylist" ${ui.importing ? "disabled" : ""}>${ui.importing ? "Importing…" : "Import"}</button>
+      </div>
+    </div>`;
   }
 
   function renderScoreboard() {
@@ -534,8 +714,17 @@
   const actions = {
     addPlayer() { settings.players.push(""); saveSettings(); render(); focusLastPlayer(); },
     removePlayer(d) { settings.players.splice(+d.i, 1); saveSettings(); render(); },
-    start() { stopAudio(); ui.testing = null; startGame(); },
-    testSound,
+    start() {
+      stopAudio();
+      ui.testing = null;
+      if (settings.source === "spotify") SpotifyApi.unlockAudio();
+      startGame();
+    },
+    spotifyConnect() { SpotifyApi.login().catch((e) => toast(e.message)); },
+    spotifyLogout() { SpotifyApi.logout(); ui.sdk = null; ui.spotifyDevices = null; render(); },
+    refreshDevices,
+    importPlaylist,
+    testSound() { if (isSpotify()) SpotifyApi.unlockAudio(); testSound(); },
     saveCustom() {
       const { out, bad } = parseCustom(document.getElementById("custom-text").value);
       customSongs = out;
@@ -591,12 +780,9 @@
       p.tokens = Math.max(0, Math.min(MAX_TOKENS, p.tokens + +d.d));
       saveGame(); render();
     },
-    togglePlay() {
-      if (!audio.getAttribute("src")) return loadAudio();
-      audio.paused ? audio.play().catch(() => {}) : audio.pause();
-    },
-    restart() { audio.currentTime = 0; audio.play().catch(() => {}); },
-    forward() { audio.currentTime = Math.min((audio.duration || 0) - 1, audio.currentTime + 10); },
+    togglePlay() { if (isSpotify()) SpotifyApi.unlockAudio(); togglePlay(); },
+    restart() { seek("restart"); },
+    forward() { seek("forward"); },
     again() {
       const names = S.players.map((p) => p.name);
       settings.players = names;
@@ -604,7 +790,7 @@
       saveSettings();
       startGame();
     },
-    quit() { stopAudio(); S = null; saveGame(); render(); },
+    quit() { stopAudio({ spotify: true }); S = null; saveGame(); render(); warmUpSpotify(); },
   };
 
   function focusLastPlayer() {
@@ -626,13 +812,15 @@
       case "target": settings.target = el.value; saveSettings(); break;
       case "startTokens": settings.startTokens = el.value; saveSettings(); break;
       case "custom": customDraft = el.value; break;
+      case "clientId": SpotifyApi.setClientId(el.value); break;
     }
   });
 
   document.addEventListener("change", (e) => {
     const el = e.target;
     switch (el.dataset.input) {
-      case "source": settings.source = el.value; saveSettings(); stopAudio(); ui.testing = null; render(); break;
+      case "source": stopAudio({ spotify: true }); settings.source = el.value; saveSettings(); ui.testing = null; render(); warmUpSpotify(); break;
+      case "spotifyDevice": settings.spotifyDevice = el.value; saveSettings(); render(); warmUpSpotify(); break;
       case "pack": {
         settings.packs = settings.packs.filter((p) => p !== el.value);
         if (el.checked) settings.packs.push(el.value);
@@ -676,7 +864,14 @@
     root.innerHTML = html;
   })();
 
-  // Resume a saved game after a reload.
-  render();
-  if (S && S.phase !== "over" && S.phase !== "reveal") loadAudio();
+  // Finish a Spotify login if we were just redirected back, then resume any saved game.
+  (async () => {
+    const res = await SpotifyApi.handleRedirect();
+    if (res === "connected") toast("Connected to Spotify! 🎉");
+    else if (res) toast(res);
+    render();
+    if (isSpotify() && SpotifyApi.isConnected() && !S) refreshDevices();
+    warmUpSpotify();
+    if (S && S.phase !== "over" && S.phase !== "reveal") loadAudio();
+  })();
 })();
