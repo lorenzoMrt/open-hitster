@@ -42,7 +42,7 @@ picks another one.
 
 **Spotify (full songs, needs Premium).** See [Playing with Spotify](#playing-with-spotify) below.
 
-**Your own songs.** On the setup screen, open **Add your own songs** and add one song per line:
+**Your own songs.** On the setup screen, open **My songs (add or edit)** and add one song per line:
 
 ```
 1985; Opus; Live Is Life
