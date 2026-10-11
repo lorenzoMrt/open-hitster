@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Open Hitster</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="snow" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <h1>🎄 Open&nbsp;Hitster</h1>
+    <div class="topbar-actions">
+      <button id="btn-rules" class="ghost">Rules</button>
+      <button id="btn-new" class="ghost hidden">New game</button>
+    </div>
+  </header>
+
+  <main id="app"></main>
+
+  <dialog id="rules">
+    <h2>How to play</h2>
+    <ol>
+      <li>Everyone starts with one card that shows its year face-up.</li>
+      <li>On your turn a mystery song plays. Place it in <b>your</b> timeline: is it older, newer, or somewhere in between your cards?</li>
+      <li>Lock it in. Anyone else with a token can shout <b>HITSTER!</b> and pay 1 🪙 to put the song somewhere else in your timeline.</li>
+      <li>Reveal. If you were right, you keep the card. If you were wrong but a challenger got it right, they get the card for their own timeline.</li>
+      <li>Name the artist <b>and</b> title before the reveal to earn 1 🪙 (max 5).</li>
+      <li>Spend 1 🪙 to skip a song you don't like, or 3 🪙 to buy a card that goes straight into your timeline.</li>
+      <li>The first player to collect the target number of cards wins!</li>
+    </ol>
+    <p class="muted">Two songs from the same year can go in either order.</p>
+    <form method="dialog"><button class="primary">Got it</button></form>
+  </dialog>
+
+  <audio id="audio" preload="auto"></audio>
+
+  <script src="songs.js"></script>
+  <script src="id3.js"></script>
+  <script src="music.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
